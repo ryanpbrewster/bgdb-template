@@ -1,8 +1,21 @@
+use std::path::PathBuf;
+
+use anyhow::Context;
 use rusqlite::{params, Connection, OptionalExtension};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::Item;
 
+pub fn open(path: PathBuf) -> anyhow::Result<Connection> {
+    let conn = Connection::open(path)?;
+    // Ensure the "items" table exists
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS items (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        [],
+    )
+    .context("Failed to create table")?;
+    Ok(conn)
+}
 pub fn spawn(conn: Connection) -> DatabaseClient {
     let (db_tx, db_rx) = mpsc::channel::<DbRequest>(32);
     std::thread::spawn(|| {
