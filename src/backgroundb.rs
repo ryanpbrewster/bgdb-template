@@ -3,7 +3,24 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::Item;
 
-pub enum DbRequest {
+pub fn spawn(conn: Connection) -> DatabaseClient {
+    let (db_tx, db_rx) = mpsc::channel::<DbRequest>(32);
+    std::thread::spawn(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(database_thread(conn, db_rx))
+    });
+    DatabaseClient { db_tx }
+}
+
+#[derive(Clone)]
+pub struct DatabaseClient {
+    db_tx: mpsc::Sender<DbRequest>,
+}
+
+enum DbRequest {
     GetAll {
         respond_to: oneshot::Sender<Result<Vec<Item>, String>>,
     },
@@ -26,17 +43,7 @@ impl std::fmt::Debug for DbRequest {
     }
 }
 
-// Database client struct
-#[derive(Clone)]
-pub struct DatabaseClient {
-    db_tx: mpsc::Sender<DbRequest>,
-}
-
 impl DatabaseClient {
-    pub fn new(db_tx: mpsc::Sender<DbRequest>) -> Self {
-        Self { db_tx }
-    }
-
     pub async fn get_all_items(&self) -> Result<Vec<Item>, String> {
         let (respond_to, response) = oneshot::channel();
 
@@ -73,7 +80,7 @@ impl DatabaseClient {
 
 // This is an abomination: an async function that does a ton of blocking I/O.
 // This should only be run in a dedicated runtime.
-pub async fn database_thread(conn: Connection, mut db_rx: mpsc::Receiver<DbRequest>) {
+async fn database_thread(conn: Connection, mut db_rx: mpsc::Receiver<DbRequest>) {
     // Listen for database requests
     while let Some(request) = db_rx.recv().await {
         tracing::debug!(?request, "recv");

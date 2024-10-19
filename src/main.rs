@@ -1,3 +1,4 @@
+use anyhow::Context;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -9,11 +10,10 @@ use clap::Parser;
 use rusqlite::Connection;
 use serde::Deserialize;
 use sqlite_async::{
-    backgroundb::{database_thread, DatabaseClient, DbRequest},
+    backgroundb::{self, DatabaseClient},
     Item,
 };
 use std::path::PathBuf;
-use tokio::sync::mpsc;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -37,31 +37,17 @@ async fn main() -> anyhow::Result<()> {
     // Parse command-line arguments
     let args = Args::parse();
 
-    // Set up the channel for database communication
-    let (db_tx, db_rx) = mpsc::channel::<DbRequest>(32);
-
-    let _db_thread = {
+    let db_client = {
         // Open the SQLite database
         let conn = Connection::open(args.database)?;
-
         // Ensure the "items" table exists
         conn.execute(
             "CREATE TABLE IF NOT EXISTS items (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
             [],
         )
-        .expect("Failed to create table");
-
-        std::thread::spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(database_thread(conn, db_rx))
-        })
+        .context("Failed to create table")?;
+        backgroundb::spawn(conn)
     };
-
-    // Create the database client
-    let db_client = DatabaseClient::new(db_tx);
 
     // Build the axum application with routes
     let app = Router::new()
