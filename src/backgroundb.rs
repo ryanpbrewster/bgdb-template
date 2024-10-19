@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use rusqlite::{params, Connection, OptionalExtension};
 use tokio::sync::{mpsc, oneshot};
 
@@ -35,15 +35,18 @@ pub struct DatabaseClient {
 
 enum DbRequest {
     GetAll {
-        respond_to: oneshot::Sender<Result<Vec<Item>, String>>,
+        respond_to: oneshot::Sender<anyhow::Result<Vec<Item>>>,
     },
     GetItem {
         key: String,
-        respond_to: oneshot::Sender<Result<Option<Item>, String>>,
+        respond_to: oneshot::Sender<anyhow::Result<Option<Item>>>,
     },
     PutItem {
         item: Item,
-        respond_to: oneshot::Sender<Result<(), String>>,
+        respond_to: oneshot::Sender<anyhow::Result<()>>,
+    },
+    Shutdown {
+        respond_to: oneshot::Sender<anyhow::Result<()>>,
     },
 }
 impl std::fmt::Debug for DbRequest {
@@ -52,42 +55,46 @@ impl std::fmt::Debug for DbRequest {
             Self::GetAll { .. } => f.debug_struct("GetAll").finish(),
             Self::GetItem { key, .. } => f.debug_struct("GetItem").field("key", key).finish(),
             Self::PutItem { item, .. } => f.debug_struct("PutItem").field("item", item).finish(),
+            Self::Shutdown { .. } => f.debug_struct("Shutdown").finish(),
         }
     }
 }
 
 impl DatabaseClient {
-    pub async fn get_all_items(&self) -> Result<Vec<Item>, String> {
+    pub async fn get_all_items(&self) -> anyhow::Result<Vec<Item>> {
         let (respond_to, response) = oneshot::channel();
 
-        self.db_tx
-            .send(DbRequest::GetAll { respond_to })
-            .await
-            .map_err(|e| e.to_string())?;
+        self.db_tx.send(DbRequest::GetAll { respond_to }).await?;
 
-        response.await.map_err(|e| e.to_string())?
+        response.await?
     }
 
-    pub async fn get_item(&self, key: String) -> Result<Option<Item>, String> {
+    pub async fn get_item(&self, key: String) -> anyhow::Result<Option<Item>> {
         let (respond_to, response) = oneshot::channel();
 
         self.db_tx
             .send(DbRequest::GetItem { key, respond_to })
-            .await
-            .map_err(|e| e.to_string())?;
+            .await?;
 
-        response.await.map_err(|e| e.to_string())?
+        response.await?
     }
 
-    pub async fn put_item(&self, item: Item) -> Result<(), String> {
+    pub async fn put_item(&self, item: Item) -> anyhow::Result<()> {
         let (respond_to, response) = oneshot::channel();
 
         self.db_tx
             .send(DbRequest::PutItem { item, respond_to })
-            .await
-            .map_err(|e| e.to_string())?;
+            .await?;
 
-        response.await.map_err(|e| e.to_string())?
+        response.await?
+    }
+
+    pub async fn shutdown(&self) -> anyhow::Result<()> {
+        let (respond_to, response) = oneshot::channel();
+
+        self.db_tx.send(DbRequest::Shutdown { respond_to }).await?;
+
+        response.await?
     }
 }
 
@@ -110,49 +117,58 @@ async fn database_thread(conn: Connection, mut db_rx: mpsc::Receiver<DbRequest>)
                 let result = put_item_db(&conn, item);
                 let _ = respond_to.send(result);
             }
+            DbRequest::Shutdown { respond_to } => {
+                let _ = respond_to.send(shutdown(conn));
+                break;
+            }
         }
     }
 }
 
 // Database operation functions
-fn get_all_items_db(conn: &Connection) -> Result<Vec<Item>, String> {
-    let mut stmt = conn
-        .prepare("SELECT key, value FROM items")
-        .map_err(|e| e.to_string())?;
-    let item_iter = stmt
-        .query_map([], |row| {
-            Ok(Item {
-                key: row.get(0)?,
-                value: row.get(1)?,
-            })
+fn get_all_items_db(conn: &Connection) -> anyhow::Result<Vec<Item>> {
+    let mut stmt = conn.prepare("SELECT key, value FROM items")?;
+    let item_iter = stmt.query_map([], |row| {
+        Ok(Item {
+            key: row.get(0)?,
+            value: row.get(1)?,
         })
-        .map_err(|e| e.to_string())?;
+    })?;
 
     let mut items = Vec::new();
     for item in item_iter {
-        items.push(item.map_err(|e| e.to_string())?);
+        items.push(item?);
     }
     Ok(items)
 }
 
-fn get_item_db(conn: &Connection, key: String) -> Result<Option<Item>, String> {
-    let mut stmt = conn
-        .prepare("SELECT value FROM items WHERE key = ?1")
-        .map_err(|e| e.to_string())?;
+fn get_item_db(conn: &Connection, key: String) -> anyhow::Result<Option<Item>> {
+    let mut stmt = conn.prepare("SELECT value FROM items WHERE key = ?1")?;
     let result = stmt
         .query_row([key.clone()], |row| row.get::<_, String>(0))
-        .optional()
-        .map_err(|e| e.to_string())?;
+        .optional()?;
 
     Ok(result.map(|value| Item { key, value }))
 }
 
-fn put_item_db(conn: &Connection, item: Item) -> Result<(), String> {
+fn put_item_db(conn: &Connection, item: Item) -> anyhow::Result<()> {
     conn.execute(
         "INSERT INTO items (key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![item.key, item.value],
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     Ok(())
+}
+
+fn shutdown(conn: Connection) -> anyhow::Result<()> {
+    match conn.close() {
+        Ok(_) => {
+            tracing::info!("closed db connection");
+            Ok(())
+        }
+        Err((_, err)) => {
+            tracing::error!(?err, "failed to close db connection");
+            bail!(err)
+        }
+    }
 }

@@ -11,7 +11,7 @@ use sqlite_async::{
     backgroundb::{self, DatabaseClient},
     Item,
 };
-use std::path::PathBuf;
+use std::{future::IntoFuture, path::PathBuf};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -38,11 +38,16 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/items", get(get_all_items))
         .route("/items/:key", get(get_item).put(put_item))
-        .with_state(db_client);
+        .with_state(db_client.clone());
 
     let listener = tokio::net::TcpListener::bind(&args.addr).await?;
     tracing::info!("listening on {}", args.addr);
-    axum::serve(listener, app).await?;
+
+    tokio::spawn(axum::serve(listener, app).into_future());
+
+    tokio::signal::ctrl_c().await?;
+
+    db_client.shutdown().await?;
 
     Ok(())
 }
