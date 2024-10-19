@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::get,
@@ -11,7 +11,7 @@ use sqlite_async::{
     backgroundb::{self, DatabaseClient},
     Item,
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -36,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Build the axum application with routes
     let app = Router::new()
+        .route("/burn", get(burn_cpu))
         .route("/items", get(get_all_items))
         .route("/items/:key", get(get_item).put(put_item))
         .with_state(db_client.clone());
@@ -46,12 +47,22 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
-            tracing::debug!("beginning graceful shutdown");
+            tracing::info!("beginning graceful shutdown");
             let _ = db_client.shutdown().await;
         })
         .await?;
     tracing::info!("graceful shutdown complete");
     Ok(())
+}
+
+async fn burn_cpu(
+    State(db_client): State<DatabaseClient>,
+    Query(duration): Query<Duration>,
+) -> Result<impl IntoResponse, StatusCode> {
+    match db_client.burn_cpu(duration).await {
+        Ok(items) => Ok(Json(items)),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 
 async fn get_all_items(

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::{Duration, Instant}};
 
 use anyhow::{bail, Context};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -34,6 +34,10 @@ pub struct DatabaseClient {
 }
 
 enum DbRequest {
+    BurnCpu {
+        duration: Duration,
+        respond_to: oneshot::Sender<anyhow::Result<()>>,
+    },
     GetAll {
         respond_to: oneshot::Sender<anyhow::Result<Vec<Item>>>,
     },
@@ -52,6 +56,7 @@ enum DbRequest {
 impl std::fmt::Debug for DbRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::BurnCpu { duration: time, .. } => f.debug_struct("BurnCpu").field("time", time).finish(),
             Self::GetAll { .. } => f.debug_struct("GetAll").finish(),
             Self::GetItem { key, .. } => f.debug_struct("GetItem").field("key", key).finish(),
             Self::PutItem { item, .. } => f.debug_struct("PutItem").field("item", item).finish(),
@@ -61,6 +66,13 @@ impl std::fmt::Debug for DbRequest {
 }
 
 impl DatabaseClient {
+    pub async fn burn_cpu(&self, duration: Duration) -> anyhow::Result<()> {
+        let (respond_to, response) = oneshot::channel();
+
+        self.db_tx.send(DbRequest::BurnCpu { duration, respond_to }).await?;
+
+        response.await?
+    }
     pub async fn get_all_items(&self) -> anyhow::Result<Vec<Item>> {
         let (respond_to, response) = oneshot::channel();
 
@@ -105,6 +117,12 @@ async fn database_thread(conn: Connection, mut db_rx: mpsc::Receiver<DbRequest>)
     while let Some(request) = db_rx.recv().await {
         tracing::debug!(?request, "recv");
         match request {
+            DbRequest::BurnCpu { duration, respond_to } => {
+                let end = Instant::now() + duration;
+                while Instant::now() < end {
+                }
+                let _ = respond_to.send(Ok(()));
+            }
             DbRequest::GetAll { respond_to } => {
                 let result = get_all_items_db(&conn);
                 let _ = respond_to.send(result);
