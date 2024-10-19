@@ -8,7 +8,10 @@ use axum::{
 use clap::Parser;
 use rusqlite::Connection;
 use serde::Deserialize;
-use sqlite_async::{backgroundb::database_thread, DatabaseClient, DbRequest, Item};
+use sqlite_async::{
+    backgroundb::{database_thread, DatabaseClient, DbRequest},
+    Item,
+};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
